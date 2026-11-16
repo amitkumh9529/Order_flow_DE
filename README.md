@@ -1,60 +1,157 @@
-# **Azure End-to-End Data Engineering Project: Adventure Works Analytics**
+# OrderFlow: Enterprise E-Commerce Data Platform
 
-This project demonstrates a complete **end-to-end data engineering solution** built on Microsoft Azure. It uses a **Medallion Architecture** to process sales, product, and customer data from the Adventure Works dataset, moving it from a raw API source to a final reporting dashboard.
+[![CI Pipeline](https://github.com/orderflow/orderflow-data-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/orderflow/orderflow-data-platform)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Architecture](https://img.shields.io/badge/architecture-Medallion%20Lakehouse-orange.svg)](#architecture)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
----
-
-### **Project Architecture**
-The project follows a **Medallion (Bronze, Silver, Gold) Architecture** to ensure data quality and scalability:
-*   **Bronze (Raw):** Stores the data exactly as it appears in the source GitHub API.
-*   **Silver (Transformed):** Contains cleaned and formatted data in **Parquet format**.
-*   **Gold (Serving):** A logical data warehouse layer used for final business reporting.
+OrderFlow is a cloud-based enterprise e-commerce data engineering platform that ingests, processes, validates, stores, and transforms data across disparate operational systems into a high-performance Medallion Lakehouse (Bronze, Silver, Gold) with Apache Airflow orchestration and Streamlit business analytics.
 
 ---
 
-### **Technology Stack**
-*   **Azure Data Factory (ADF):** Used as the **orchestration tool** to build dynamic data pipelines.
-*   **Azure Data Lake Storage Gen2 (ADLS):** Serves as the centralized storage with **Hierarchical Namespace** enabled for folder management.
-*   **Azure Databricks:** A powerful Spark-based platform for performing **Big Data transformations** using **PySpark**.
-*   **Azure Synapse Analytics:** Provides a **Serverless SQL pool** to create a Lakehouse/Logical Data Warehouse.
-*   **Power BI:** Connects to the Gold layer for **data visualization** and KPI tracking.
-*   **Microsoft Entra ID:** Manages security through **App Registrations** and **Managed Identities**.
+## 1. Business Problem & Scenario
+
+Fast-growing e-commerce businesses face fragmented data spread across independent operational services:
+- **Disparate Systems**: Customer accounts, catalog metadata, multi-item orders, multiple payment attempts (UPI, Cards, COD), shipments, warehouse inventories, and web clickstream events live in silos.
+- **Reporting Inconsistencies**: Late-arriving transactions and updates cause misaligned financial reconciliation.
+- **Customer Identity Drift**: Customer contact and location details update without historical tracking (SCD Type 2).
+- **Manual Data Dumps**: Downstream analytics rely on brittle, manual CSV exports rather than automated, validated, and idempotent ELT pipelines.
+
+OrderFlow resolves these challenges through an end-to-end automated platform featuring incremental extraction, verifiable S3 cloud landing, Databricks Delta Lake medallion architecture, multi-layer data quality auditing, and interactive business intelligence.
 
 ---
 
-### **Data Source**
-The project utilizes the **Adventure Works dataset**, which includes over **10 tables** such as Sales (2015–2017), Customers (56,000+ records), Products, and Territories. Data is pulled directly from a **GitHub API** rather than manual uploads to simulate a real-world scenario.
+## 2. High-Level Architecture
+
+```text
+                      OPERATIONAL SYSTEMS
+                               |
+              +----------------+----------------+
+              |                |                |
+           Orders          Customers         Products
+          Payments         Inventory        Shipments
+              |                |                |
+              +----------------+----------------+
+                               |
+                               v
+                     SUPABASE POSTGRESQL
+                        (app schema)
+                               |
+                               v
+                   INCREMENTAL PYTHON INGESTION
+                               |
+               +---------------+---------------+
+               |                               |
+               v                               v
+          RAW EXTRACTION                 DATA QUALITY GATES
+         (Watermarked Window)          (Schema, PK, Freshness)
+               |
+               v
+            AWS S3
+         (raw/ landing)
+               |
+               v
+           DATABRICKS
+               |
+       +-------+-------+
+       |               |
+       v               v
+     BRONZE        QUARANTINE
+   (Raw Delta)   (Invalid Records)
+       |
+       v
+     SILVER (Cleaned, Standardized, Deduplicated, SCD2 Customer History)
+       |
+       v
+      GOLD (Dimensional Star Schema & 6 Business Data Marts)
+       |
+       v
+   PUBLISHER & SUPABASE ANALYTICS (analytics schema)
+       |
+       v
+  STREAMLIT DASHBOARDS & APIS
+```
 
 ---
 
-### **Implementation Steps**
+## 3. Technology Stack
 
-#### **1. Data Ingestion (Source to Bronze)**
-*   Set up **Azure Data Lake Storage Gen2** with containers for `bronze`, `silver`, and `gold`.
-*   Built **Dynamic Pipelines** in ADF using **Parameters, For-Each loops, and Lookup activities**.
-*   Ingested **10+ datasets** from the GitHub HTTP source into the Bronze layer in their original CSV format.
-
-#### **2. Data Transformation (Bronze to Silver)**
-*   Established a secure connection between Databricks and the Data Lake using a **Service Principal (App Registration)**.
-*   Developed PySpark notebooks to clean and transform the data, including:
-    *   **String Cleaning:** Concatenating names (e.g., `full name`) and splitting product SKUs.
-    *   **Date Formatting:** Converting strings to timestamps and extracting months/years.
-    *   **Mathematical Operations:** Calculating line item totals.
-*   Saved the cleaned data into the **Silver layer** using the **Parquet file format** for better read performance.
-
-#### **3. Data Serving (Silver to Gold)**
-*   Created a **Serverless SQL Database** in Azure Synapse Analytics.
-*   Built an abstraction layer using **OpenRowSet** and **SQL Views** to query Parquet files directly from the Data Lake.
-*   Implemented **CETAS (Create External Table As Select)** to physically store the final refined data in the **Gold layer** folder.
-
-#### **4. Reporting & Visualization**
-*   Connected **Power BI Desktop** to the Azure Synapse **Serverless SQL endpoint**.
-*   Imported the Gold layer tables to build a business dashboard.
-*   Visualized key metrics such as **Sales Trends** over time and a total customer count of **56,000+**.
+| Layer | Component | Description |
+|---|---|---|
+| **Language** | Python 3.11+ | Core extraction, generators, testing, validation |
+| **Operational DB** | Supabase PostgreSQL | Source OLTP database with `app`, `ops`, and `analytics` schemas |
+| **Cloud Storage** | AWS S3 | Immutable raw Parquet files with SHA-256 manifests |
+| **Lakehouse Engine** | Databricks & PySpark | Distributed transformations across Bronze, Silver, Gold Delta tables |
+| **Data Format** | Delta Lake & Apache Parquet | ACID transactions, time travel, schema enforcement |
+| **Orchestration** | Apache Airflow 3 | Scheduled DAGs for ingestion, handoff, and publishing |
+| **Data Quality** | Custom Pytest & Spark Audits | Schema validation, referential integrity, financial reconciliation |
+| **Analytics & UI** | Streamlit & Plotly | Interactive 8-page business intelligence dashboard |
+| **CI/CD** | GitHub Actions | Automated linting (Ruff), typing, and unit/integration testing |
 
 ---
 
-### **Key Concepts Covered**
-*   **Dynamic Parameterization:** Reducing manual work by building scalable pipelines.
-*   **Managed Identities:** Using built-in Azure security to access resources without managing passwords.
-*   **Lakehouse Architecture:** Combining the flexibility of a Data Lake with the querying power of a Data Warehouse.
+## 4. Repository Structure
+
+```text
+orderflow/
+├── config/                 # Settings and pipeline configuration
+├── sql/
+│   ├── migrations/         # 12 PostgreSQL operational table migrations
+│   ├── analytics/          # Dimensional models and data mart DDL
+│   └── quality/            # SQL-based source verification scripts
+├── scripts/                # CLI runners: seed, ingest, handoff, publish, report
+├── src/orderflow/          # Core Python framework
+│   ├── database/           # Connection pooling and source readers
+│   ├── ingestion/          # Watermarked batch incremental extractors
+│   ├── storage/            # S3 client and Parquet writer with manifests
+│   ├── generator/          # Realistic synthetic e-commerce data generator
+│   ├── quality/            # Multi-layer data quality and financial reconciliation
+│   ├── publishing/         # Gold model loader and Supabase upsert
+│   └── utils/              # Hashing, date utilities, retry decorators
+├── databricks/             # 15 Medallion notebooks (Bronze -> Silver -> Gold)
+├── airflow/dags/           # Airflow DAGs (Ingestion, Handoff, Publish)
+├── dashboard/              # 8-page Streamlit analytics dashboard
+├── tests/                  # Unit, integration, quality, and idempotency tests
+└── docs/                   # Complete architecture, schema, and runbook documentation
+```
+
+---
+
+## 5. Quick Start Guide
+
+### 1. Environment Setup
+```bash
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+pip install -e ".[dev,spark]"
+cp .env.example .env
+```
+
+### 2. Database Migrations & Seeding
+```bash
+# Seed synthetic data with small profile (1,500 customers, 5,000 orders)
+python -m scripts.seed_database --profile small --seed 42
+```
+
+### 3. Run Ingestion Pipeline
+```bash
+# Extract incremental batches and upload to S3
+python -m scripts.run_ingestion --mode full
+```
+
+### 4. Databricks Medallion Transformation
+Run the sequential Databricks notebooks in `databricks/` or execute the local transformation pipeline:
+```bash
+python -m scripts.prepare_databricks_handoff
+```
+
+### 5. Publish to Analytics & Launch Dashboard
+```bash
+python -m scripts.publish_gold
+streamlit run dashboard/app.py
+```
+
+---
+
+## 6. Implementation Status
+Refer to [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for full phase-by-phase completion details and test results.
