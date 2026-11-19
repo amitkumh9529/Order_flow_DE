@@ -1,157 +1,259 @@
-# OrderFlow: Enterprise E-Commerce Data Platform
+# OrderFlow: Enterprise E-Commerce Cloud Data Platform
 
 [![CI Pipeline](https://github.com/orderflow/orderflow-data-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/orderflow/orderflow-data-platform)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Architecture](https://img.shields.io/badge/architecture-Medallion%20Lakehouse-orange.svg)](#architecture)
+[![Delta Lake](https://img.shields.io/badge/data--format-Delta%20Lake%20%7C%20Parquet-blue.svg)](https://delta.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-OrderFlow is a cloud-based enterprise e-commerce data engineering platform that ingests, processes, validates, stores, and transforms data across disparate operational systems into a high-performance Medallion Lakehouse (Bronze, Silver, Gold) with Apache Airflow orchestration and Streamlit business analytics.
+OrderFlow is a production-grade cloud enterprise e-commerce data engineering platform. It ingests, validates, stores, and transforms high-volume operational e-commerce data into a high-performance **Medallion Lakehouse** (Bronze, Silver, Gold Delta tables) using **Supabase PostgreSQL**, **AWS S3**, **Databricks (PySpark & Delta Lake)**, **Apache Airflow**, and **Streamlit** business intelligence analytics.
 
 ---
 
-## 1. Business Problem & Scenario
-
-Fast-growing e-commerce businesses face fragmented data spread across independent operational services:
-- **Disparate Systems**: Customer accounts, catalog metadata, multi-item orders, multiple payment attempts (UPI, Cards, COD), shipments, warehouse inventories, and web clickstream events live in silos.
-- **Reporting Inconsistencies**: Late-arriving transactions and updates cause misaligned financial reconciliation.
-- **Customer Identity Drift**: Customer contact and location details update without historical tracking (SCD Type 2).
-- **Manual Data Dumps**: Downstream analytics rely on brittle, manual CSV exports rather than automated, validated, and idempotent ELT pipelines.
-
-OrderFlow resolves these challenges through an end-to-end automated platform featuring incremental extraction, verifiable S3 cloud landing, Databricks Delta Lake medallion architecture, multi-layer data quality auditing, and interactive business intelligence.
-
----
-
-## 2. High-Level Architecture
+## 1. High-Level Architecture
 
 ```text
-                      OPERATIONAL SYSTEMS
-                               |
-              +----------------+----------------+
-              |                |                |
-           Orders          Customers         Products
-          Payments         Inventory        Shipments
-              |                |                |
-              +----------------+----------------+
-                               |
-                               v
-                     SUPABASE POSTGRESQL
-                        (app schema)
-                               |
-                               v
-                   INCREMENTAL PYTHON INGESTION
-                               |
-               +---------------+---------------+
-               |                               |
-               v                               v
-          RAW EXTRACTION                 DATA QUALITY GATES
-         (Watermarked Window)          (Schema, PK, Freshness)
-               |
-               v
-            AWS S3
-         (raw/ landing)
-               |
-               v
-           DATABRICKS
-               |
-       +-------+-------+
-       |               |
-       v               v
-     BRONZE        QUARANTINE
-   (Raw Delta)   (Invalid Records)
-       |
-       v
-     SILVER (Cleaned, Standardized, Deduplicated, SCD2 Customer History)
-       |
-       v
-      GOLD (Dimensional Star Schema & 6 Business Data Marts)
-       |
-       v
-   PUBLISHER & SUPABASE ANALYTICS (analytics schema)
-       |
-       v
-  STREAMLIT DASHBOARDS & APIS
+┌────────────────────────────────────────────────────────────────────────┐
+│                        1. SOURCE (OLTP)                                │
+│                     Supabase PostgreSQL                               │
+│                   ('app' schema: 10 tables)                            │
+│     customers, catalog, sellers, warehouses, orders, line items,       │
+│           payments, shipments, inventory, web clickstream              │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ Incremental Python Extractor (run_ingestion.py)
+                                    │ Sliding watermarked batch windows (ops.watermarks)
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                     2. BRONZE LAYER (Landing)                          │
+│                            AWS S3                                      │
+│        s3://order-flow-de/raw/{entity}/year=.../month=.../             │
+│        - Columnar Apache Parquet + Snappy compression                  │
+│        - Audit metadata: _extracted_at, _batch_id, _record_checksum    │
+│        - Cryptographic SHA-256 batch manifest verification             │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ Databricks Auto Loader / read_parquet
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│          3. TRANSFORMATION ENGINE & LAKEHOUSE (Delta Lake)             │
+│                       Databricks & PySpark                             │
+│                                                                        │
+│   ┌────────────────────────────────────────────────────────────────┐   │
+│   │  Silver Layer (Delta Tables):                                  │   │
+│   │  - Cleansing, deduplication, schema enforcement                │   │
+│   │  - Quarantine pattern for malformed records                    │   │
+│   │  - SCD Type 2 tracking on dim_customer_history                 │   │
+│   └───────────────────────────────┬────────────────────────────────┘   │
+│                                   │ PySpark Dimensional Joins & Aggs   │
+│                                   ▼                                    │
+│   ┌────────────────────────────────────────────────────────────────┐   │
+│   │  Gold Layer (Delta Tables):                                    │   │
+│   │  - Star Schema: 8 Dimensions & 6 Fact tables                   │   │
+│   │  - 6 Pre-computed Business Data Marts (sales, cohorts, etc.)   │   │
+│   │  - Data Quality & Financial Reconciliation Gates               │   │
+│   │    (Order Total = Subtotal - Discount + Tax + Shipping)        │   │
+│   └────────────────────────────────────────────────────────────────┘   │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ Gold Exporter / Publisher (publish_gold.py)
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                        4. CONSUMPTION & BI                             │
+│     - Supabase / PostgreSQL Serving Layer ('analytics' schema)         │
+│     - Streamlit BI Dashboard (dashboard/app.py - 7 analytics pages)    │
+│     - Direct Databricks SQL Queries on Gold Delta Lake                 │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. Technology Stack
+## 2. Technology Stack
 
 | Layer | Component | Description |
 |---|---|---|
-| **Language** | Python 3.11+ | Core extraction, generators, testing, validation |
-| **Operational DB** | Supabase PostgreSQL | Source OLTP database with `app`, `ops`, and `analytics` schemas |
-| **Cloud Storage** | AWS S3 | Immutable raw Parquet files with SHA-256 manifests |
-| **Lakehouse Engine** | Databricks & PySpark | Distributed transformations across Bronze, Silver, Gold Delta tables |
-| **Data Format** | Delta Lake & Apache Parquet | ACID transactions, time travel, schema enforcement |
-| **Orchestration** | Apache Airflow 3 | Scheduled DAGs for ingestion, handoff, and publishing |
-| **Data Quality** | Custom Pytest & Spark Audits | Schema validation, referential integrity, financial reconciliation |
-| **Analytics & UI** | Streamlit & Plotly | Interactive 8-page business intelligence dashboard |
-| **CI/CD** | GitHub Actions | Automated linting (Ruff), typing, and unit/integration testing |
+| **Language** | Python 3.11+ | Ingestion engine, synthetic generators, testing, and validation |
+| **Operational Source (OLTP)** | Supabase PostgreSQL | Source transactional database (`app` schema) and metadata tracking (`ops` schema) |
+| **Bronze Landing** | AWS S3 | Immutable columnar raw Parquet files with SHA-256 batch manifests |
+| **Lakehouse Engine** | Databricks & PySpark | Distributed transformations across Bronze, Silver, and Gold Delta tables |
+| **Data Format** | Delta Lake & Apache Parquet | ACID transactions, schema enforcement, time-travel, and columnar compaction |
+| **Orchestration** | Apache Airflow | Scheduled DAGs for ingestion, Databricks handoff, and Gold publishing |
+| **Data Quality & Audit** | Pytest & Custom Audits | Schema validation, referential integrity, and automated financial reconciliation |
+| **Analytics & UI** | Streamlit & Plotly | Interactive 8-page business intelligence and executive KPI dashboard |
 
 ---
 
-## 4. Repository Structure
+## 3. Repository Structure
 
 ```text
-orderflow/
-├── config/                 # Settings and pipeline configuration
+Order_Flow/
+├── config/                 # Pydantic Settings, environment and logging configs
 ├── sql/
-│   ├── migrations/         # 12 PostgreSQL operational table migrations
-│   ├── analytics/          # Dimensional models and data mart DDL
+│   ├── migrations/         # 12 PostgreSQL operational table migrations (app & ops)
+│   ├── analytics/          # Dimensional Star Schema and Data Mart DDL (analytics)
 │   └── quality/            # SQL-based source verification scripts
-├── scripts/                # CLI runners: seed, ingest, handoff, publish, report
+├── scripts/                # CLI runners: seed, ingest, handoff, publish, demo
+│   ├── seed_database.py             # Operational DB seeder (small & standard profiles)
+│   ├── run_ingestion.py             # Incremental/Full batch extractor to Parquet
+│   ├── prepare_databricks_handoff.py# Packages landing files for Databricks Lakehouse
+│   ├── publish_gold.py              # Loads and upserts Gold models into analytics DB
+│   └── generate_demo_report.py      # End-to-end single-command pipeline verification
 ├── src/orderflow/          # Core Python framework
-│   ├── database/           # Connection pooling and source readers
-│   ├── ingestion/          # Watermarked batch incremental extractors
-│   ├── storage/            # S3 client and Parquet writer with manifests
+│   ├── database/           # Connection pooling, query builders, and readers/writers
+│   ├── ingestion/          # Watermarked batch incremental and full extractors
+│   ├── storage/            # S3 client, Parquet writer, and SHA-256 manifests
 │   ├── generator/          # Realistic synthetic e-commerce data generator
 │   ├── quality/            # Multi-layer data quality and financial reconciliation
-│   ├── publishing/         # Gold model loader and Supabase upsert
-│   └── utils/              # Hashing, date utilities, retry decorators
+│   ├── publishing/         # Gold loader, local lakehouse runner, and upsert engine
+│   └── utils/              # Hashing, timestamps, and retry decorators
 ├── databricks/             # 15 Medallion notebooks (Bronze -> Silver -> Gold)
-├── airflow/dags/           # Airflow DAGs (Ingestion, Handoff, Publish)
+│   ├── 00_environment_setup.py      # Creates catalogs, schemas, and volumes
+│   ├── 01_bronze_ingestion.py       # Raw Parquet landing to Bronze Delta tables
+│   ├── 02-08_silver_*.py            # Cleansed & standardized Silver Delta tables
+│   ├── 09_scd2_customer.py          # SCD Type 2 customer history tracking
+│   ├── 10-11_gold_*.py              # Star Schema dimensional models and facts
+│   ├── 12_gold_marts.py             # 6 analytical business marts
+│   ├── 13_data_quality.py           # Automated financial reconciliation audits
+│   └── 14_export_gold.py            # Exports Gold models for downstream serving
+├── airflow/dags/           # Airflow DAGs (Ingestion, Lakehouse Handoff, Publish)
 ├── dashboard/              # 8-page Streamlit analytics dashboard
 ├── tests/                  # Unit, integration, quality, and idempotency tests
-└── docs/                   # Complete architecture, schema, and runbook documentation
+└── docs/                   # Complete architecture, schema, and deployment runbooks
+```
+
+---
+
+## 4. Environment Configuration (`.env`)
+
+Copy the example configuration file:
+```bash
+cp .env.example .env
+```
+
+Configure your environment credentials:
+
+```ini
+APP_ENV=local
+
+# Operational & Analytics Database (Supabase PostgreSQL)
+# Note: Use port 6543 (transaction pooler) with sslmode=require for cloud Supabase
+SUPABASE_DB_URL=postgresql://postgres.[PROJECT_REF]:[PASSWORD]@aws-1-[REGION].pooler.supabase.com:6543/postgres?sslmode=require
+SUPABASE_DB_READ_URL=postgresql://postgres.[PROJECT_REF]:[PASSWORD]@aws-1-[REGION].pooler.supabase.com:6543/postgres?sslmode=require
+SUPABASE_DB_WRITE_URL=postgresql://postgres.[PROJECT_REF]:[PASSWORD]@aws-1-[REGION].pooler.supabase.com:6543/postgres?sslmode=require
+
+# (Optional) For offline/local development without cloud dependencies, you can use SQLite:
+# SUPABASE_DB_URL=sqlite:///orderflow.db
+
+# AWS S3 (Bronze Landing)
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=your_access_key_id
+AWS_SECRET_ACCESS_KEY=your_secret_access_key
+AWS_S3_BUCKET=order-flow-de
+
+# Databricks Lakehouse
+DATABRICKS_MODE=direct_s3  # Use 'direct_s3' for cloud S3, or 'free_handoff' for Community Edition
+DATABRICKS_CATALOG=orderflow
+DATABRICKS_SERVER_HOSTNAME=https://dbc-xxxx.cloud.databricks.com
+DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/xxxx
+DATABRICKS_TOKEN=dapi...
+
+# Dashboard
+STREAMLIT_PORT=8501
 ```
 
 ---
 
 ## 5. Quick Start Guide
 
-### 1. Environment Setup
+### 1. Installation & Environment Setup
+
 ```bash
+# Create virtual environment
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Activate virtual environment
+# Windows (PowerShell):
+.\.venv\Scripts\Activate.ps1
+# Linux / macOS:
+source .venv/bin/activate
+
+# Install dependencies in editable mode
 pip install -e ".[dev,spark]"
-cp .env.example .env
-```
-
-### 2. Database Migrations & Seeding
-```bash
-# Seed synthetic data with small profile (1,500 customers, 5,000 orders)
-python -m scripts.seed_database --profile small --seed 42
-```
-
-### 3. Run Ingestion Pipeline
-```bash
-# Extract incremental batches and upload to S3
-python -m scripts.run_ingestion --mode full
-```
-
-### 4. Databricks Medallion Transformation
-Run the sequential Databricks notebooks in `databricks/` or execute the local transformation pipeline:
-```bash
-python -m scripts.prepare_databricks_handoff
-```
-
-### 5. Publish to Analytics & Launch Dashboard
-```bash
-python -m scripts.publish_gold
-streamlit run dashboard/app.py
+# or with uv:
+uv pip install -e .
 ```
 
 ---
 
-## 6. Implementation Status
-Refer to [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for full phase-by-phase completion details and test results.
+### 2. Run the Full Pipeline in One Command (Demo / Verification)
+
+To execute all 5 lifecycle stages (Data Generation $\rightarrow$ Ingestion & Parquet Landing $\rightarrow$ Medallion Transformation $\rightarrow$ Financial Reconciliation $\rightarrow$ Analytics Publishing) and generate an audit report in ~5 seconds:
+
+```bash
+python -m scripts.generate_demo_report
+```
+
+---
+
+### 3. Step-by-Step Lifecycle Execution
+
+#### Step A: Seed the Operational Database (OLTP)
+Populates customers, products, sellers, warehouses, orders, line items, payments, shipments, inventory, and web clickstream events:
+```bash
+python -m scripts.seed_database --profile small --seed 42 --reset
+```
+*(Use `--profile standard` for large scale: 10,000 customers, 50,000 orders, 250,000 web events).*
+
+#### Step B: Run Incremental Ingestion to S3 / Parquet Landing
+Extracts watermarked batches from `app.*`, applies quality gates, stamps audit metadata, and writes partitioned Parquet files:
+```bash
+python -m scripts.run_ingestion --mode full
+```
+
+#### Step C: Prepare Databricks Lakehouse Handoff
+Packages landing partitions and creates handoff manifests:
+```bash
+python -m scripts.prepare_databricks_handoff
+```
+
+#### Step D: Run Medallion Transformations in Databricks
+Import the `databricks/` folder into your Databricks workspace and run the sequential notebooks:
+1. `00_environment_setup.py`: Creates Unity Catalog schemas (`landing`, `bronze`, `silver`, `gold`, `quarantine`, `audit`).
+2. `01_bronze_ingestion.py`: Ingests Parquet files into append-only Bronze Delta tables.
+3. `02` through `09`: Cleanses, deduplicates, quarantines invalid records, and implements SCD Type 2 on customer history.
+4. `10` through `12`: Constructs Gold Star Schema dimensions/facts and 6 business data marts.
+5. `13_data_quality.py`: Evaluates financial reconciliation:
+   $$\text{Order Total} = \text{Subtotal} - \text{Discount} + \text{Tax} + \text{Shipping}$$
+6. `14_export_gold.py`: Emits optimized Gold models and verification manifests.
+
+#### Step E: Publish to Analytics Serving Layer
+```bash
+python -m scripts.publish_gold
+```
+
+#### Step F: Launch the Interactive BI Dashboard
+```bash
+streamlit run dashboard/app.py
+```
+Open **`http://localhost:8501`** to explore:
+- 📊 **Executive Overview**: High-level KPIs (revenue, margin, orders).
+- 📈 **Sales Analytics**: Daily revenue trends, channel breakdown, and geography.
+- 👥 **Customer Cohorts**: Retention matrices and customer LTV progression.
+- 📦 **Product Performance**: Top sellers, return rates, and category velocity.
+- 💳 **Payments & Audit**: Reconciliation variance, payment methods, and failure logs.
+- 🚚 **Logistics & Deliveries**: Transit duration, carrier efficiency, and SLA compliance.
+- 🏭 **Inventory Health**: Stockout alerts and replenishment points.
+- 🔍 **Pipeline Observability**: Ingestion logs, batch freshness, and quality gate pass rates.
+
+---
+
+## 6. Running Tests
+
+Run the Pytest suite covering unit tests, schema validation, data quality gates, and pipeline idempotency:
+
+```bash
+pytest
+```
+
+---
+
+## 7. License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
